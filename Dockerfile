@@ -17,3 +17,4 @@ COPY . /app
 # This loads the Flask app 'app' from the file 'main.py'
 
 CMD gunicorn main:app --bind 0.0.0.0:$PORT
+
