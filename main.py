@@ -22,7 +22,7 @@ DAILY_TIMEFRAME = '1d' # For CPR calculation
 
 # Initialize Bot and Exchange
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-exchange = ccxt.binance({
+exchange = ccxt.coinbasepro({
     'enableRateLimit': True,
     'rateLimit': 1000, # Respect exchange rate limits
 })
@@ -198,4 +198,5 @@ async def start_bot_scheduler():
 if __name__ == '__main__':
     # Initial run check (optional, but good for debugging)
     print("Starting bot...")
+
     asyncio.run(start_bot_scheduler())
