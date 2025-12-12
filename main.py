@@ -150,33 +150,39 @@ async def generate_and_send_signal(symbol):
         trend, trend_emoji, proximity_msg, signal, signal_emoji = get_trend_and_signal(df, cpr_levels)
         current_price = df.iloc[-1]['close']
         
-        # Step 3: Format Professional Message
+        # --- CRITICAL FIX: Switch all Markdown to HTML tags ---
+        # <b> for **bold** and <i> for *italic* are supported HTML tags.
+        
         # Format the CPR levels with a focus on PP and R1/S1
         cpr_text = (
-            f"**Daily CPR Levels:**\n"
-            f"  - **PP (Pivot Point):** `{cpr_levels['PP']:.2f}`\n"
-            f"  - **R1/S1:** `{cpr_levels['R1']:.2f}` / `{cpr_levels['S1']:.2f}`\n"
-            f"  - **R2/S2:** `{cpr_levels['R2']:.2f}` / `{cpr_levels['S2']:.2f}`\n"
+            f"<b>Daily CPR Levels:</b>\n"
+            f"  - <b>PP (Pivot Point):</b> <code>{cpr_levels['PP']:.2f}</code>\n"
+            f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:.2f}</code> / <code>{cpr_levels['S1']:.2f}</code>\n"
+            f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:.2f}</code> / <code>{cpr_levels['S2']:.2f}</code>\n"
         )
         
+        # Ensure all price/level values are wrapped in <code> for safe parsing
         message = (
-            f"📈 {symbol} Market Analysis ({TIMEFRAME} Chart)\n"
-            f"---🚨 **{signal_emoji} AI SIGNAL: {signal}** 🚨---\n\n"
-            f"💰 **Current Price:** `{current_price:.2f}`\n"
-            f"{trend_emoji} **Trend Analysis (SMA 9/20):** {trend}\n\n"
-            f"📊 **Key Levels Summary**\n"
-            f"{proximity_msg}\n"
+            f"<b>📈 {symbol} Market Analysis ({TIMEFRAME} Chart)</b>\n"
+            f"---🚨 <b>{signal_emoji} AI SIGNAL: {signal}</b> 🚨---\n\n"
+            f"💰 <b>Current Price:</b> <code>{current_price:.2f}</code>\n"
+            f"{trend_emoji} <b>Trend Analysis (SMA 9/20):</b> {trend}\n\n"
+            f"📊 <b>Key Levels Summary</b>\n"
+            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n"
             f"{cpr_text}"
-            f"\n*Analysis based on Daily CPR and {TIMEFRAME} SMA Crossover."
+            f"\n<i>Analysis based on Daily CPR and {TIMEFRAME} SMA Crossover.</i>" # Changed *italic* to <i>italic</i>
         )
 
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
         print(f"Signal for {symbol} sent successfully!")
 
     except Exception as e:
         print(f"Error for {symbol}: {e}")
-        message = f"⚠️ Critical Error generating signal for {symbol}: {e}"
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+        # Send a simplified, unformatted message to avoid further parsing errors
+        error_message = f"⚠️ Critical Error generating signal for {symbol}. The background analysis thread failed. Please check logs."
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message)
+
+# The rest of the code (start_bot_scheduler, if __name__ == '__main__') remains the same.
 
 # 5. Scheduler Setup
 async def start_bot_scheduler():
@@ -200,5 +206,6 @@ if __name__ == '__main__':
     print("Starting bot...")
 
     asyncio.run(start_bot_scheduler())
+
 
 
