@@ -1,5 +1,5 @@
 # main.py - The main execution file
-
+import traceback
 import os
 import ccxt
 import pandas as pd
@@ -206,6 +206,7 @@ if __name__ == '__main__':
     print("Starting bot...")
 
     asyncio.run(start_bot_scheduler())
+
 
 
 
