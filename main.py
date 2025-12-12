@@ -24,7 +24,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-CRYPTOS = os.getenv("CRYPTOS", "BTC/USDT,ETH/USDT").split(',') 
+CRYPTOS = os.getenv("CRYPTOS", "BTC-USDT,ETH-USDT").split(',') 
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 DAILY_TIMEFRAME = '1d' 
 ANALYSIS_INTERVAL = 30 
@@ -386,4 +386,5 @@ scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
 print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
+
 
