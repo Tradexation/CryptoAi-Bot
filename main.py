@@ -1,4 +1,4 @@
-# main.py - The final streamlined execution file
+# main.py - The final working structure for Render Web Service
 
 import os
 import ccxt
@@ -9,8 +9,9 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from flask import Flask, jsonify, render_template_string
-import threading # Still needed for the main event loop
+import threading
 import time
+import traceback # Required for better error diagnostics
 
 # --- CONFIGURATION LOADING ---
 from dotenv import load_dotenv 
@@ -25,6 +26,7 @@ ANALYSIS_INTERVAL = 30 # Set to 30 minutes
 
 # Initialize Bot and Exchange
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# Switched to KuCoin to bypass Binance geo-restrictions and Coinbase timeframe errors
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'rateLimit': 1000, 
@@ -41,14 +43,13 @@ bot_stats = {
     "uptime_start": datetime.now().isoformat()
 }
 
-# (Keep your HTML_TEMPLATE and /health, /status routes here, unchanged)
-# ... (Placeholder for the unchanged Flask routes and template) ...
-
 @app.route('/')
 def home():
+    # Placeholder for a simple homepage
     return render_template_string("<h1>Bot Status Page</h1>" + 
                                  f"<p>Status: {bot_stats['status']}</p>" + 
-                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>")
+                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
+                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>")
 
 @app.route('/health')
 def health():
@@ -58,30 +59,164 @@ def health():
 def status():
     return jsonify(bot_stats), 200
 
-# ========== ANALYSIS FUNCTIONS (Unchanged logic) ==========
-# (Keep your calculate_cpr_levels, fetch_and_prepare_data, get_trend_and_signal functions here, unchanged)
-# ...
+# ========== TECHNICAL ANALYSIS FUNCTIONS (Defined before scheduler calls them) ==========
 
-# 4. Orchestration and Sending Message (Finalized with HTML mode)
+# 1. CPR Calculation Function
+def calculate_cpr_levels(df_daily):
+    """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
+    # --- FIX: Check for sufficient data ---
+    if df_daily.empty or len(df_daily) < 2:
+        print("⚠️ CPR calculation failed: Not enough historical daily data (need at least 2 days).")
+        return None
+
+    # Get data from the *last completed* daily candle (index -2)
+    prev_day = df_daily.iloc[-2]  
+    
+    H = prev_day['high']
+    L = prev_day['low']
+    C = prev_day['close']
+    
+    # CPR Components
+    PP = (H + L + C) / 3.0
+    BC = (H + L) / 2.0
+    TC = PP - BC + PP
+    
+    # Resistance & Support Levels
+    R1 = 2 * PP - L
+    S1 = 2 * PP - H
+    R2 = PP + (H - L)
+    S2 = PP - (H - L)
+    R3 = H + 2 * (PP - L)
+    S3 = L - 2 * (H - PP)
+    
+    cpr_width = abs(TC - BC)
+
+    return {
+        'PP': PP, 'TC': TC, 'BC': BC, 'R1': R1, 'S1': S1,
+        'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3, 'CPR_Width': cpr_width
+    }
+
+# 2. Data Fetching and Preparation Function
+def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=100):
+    """Fetches main chart data and daily data for CPR, and calculates SMAs."""
+    
+    # Fetch main chart data (e.g., 4h data)
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    
+    # --- FIX: Drop NaNs from the main DataFrame before and after SMA calculation ---
+    df = df.dropna()
+    
+    # Calculate SMAs (9 and 20 periods)
+    df['fast_sma'] = df['close'].rolling(window=9).mean()
+    df['slow_sma'] = df['close'].rolling(window=20).mean()
+    
+    # Drop NaNs again after calculating SMAs (the first 20 rows will have NaNs)
+    df = df.dropna() 
+    
+    # Check if we have enough data left for analysis
+    if len(df) < 20: # Ensure we have enough clean rows to analyze the trend
+        return pd.DataFrame(), None
+    
+    # Fetch Daily data for CPR calculation
+    ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=limit)
+    df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_daily.set_index('timestamp', inplace=True)
+    
+    # Calculate CPR levels
+    cpr_levels = calculate_cpr_levels(df_daily)
+    
+    return df, cpr_levels
+
+# 3. Trend and Signal Generation
+def get_trend_and_signal(df, cpr_levels):
+    """Determines trend via SMA crossover and checks price vs CPR levels."""
+    
+    # Get the latest data point
+    latest = df.iloc[-1]
+    current_price = latest['close']
+    fast_sma = latest['fast_sma']
+    slow_sma = latest['slow_sma']
+    
+    # Check for SMA Crossover (Trend)
+    trend = "Neutral"
+    if fast_sma > slow_sma:
+        trend = "Uptrend (Fast SMA > Slow SMA)"
+        trend_emoji = "🟢"
+    elif fast_sma < slow_sma:
+        trend = "Downtrend (Fast SMA < Slow SMA)"
+        trend_emoji = "🔴"
+    else:
+        trend_emoji = "🟡"
+
+    # Check for proximity to the Central Pivot Point (PP)
+    pp = cpr_levels.get('PP', 'N/A')
+    
+    proximity_msg = ""
+    if pp != 'N/A':
+        distance_to_pp = current_price - pp
+        if abs(distance_to_pp / pp) < 0.005: # Price is within 0.5% of PP
+            proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
+        elif distance_to_pp > 0:
+            proximity_msg = f"Price is <b>Above PP</b> ({pp:.2f})."
+        else:
+            proximity_msg = f"Price is <b>Below PP</b> ({pp:.2f})."
+            
+    # Simple Signal: Buy if Uptrend and Above PP, Sell if Downtrend and Below PP
+    signal = "HOLD"
+    signal_emoji = "🟡"
+    if trend == "Uptrend (Fast SMA > Slow SMA)" and current_price > pp:
+        signal = "STRONG BUY"
+        signal_emoji = "🚀"
+    elif trend == "Downtrend (Fast SMA < Slow SMA)" and current_price < pp:
+        signal = "STRONG SELL"
+        signal_emoji = "🔻"
+        
+    return trend, trend_emoji, proximity_msg, signal, signal_emoji
+
+
+# 4. ASYNC SCHEDULER FUNCTIONS
+
 async def generate_and_send_signal(symbol):
     """Fetches data, runs analysis, and sends the Telegram message."""
-    # (Keep your FINAL, HTML-formatted message logic here, unchanged)
+    print(f"Generating signal for {symbol}...")
     
-    # NOTE: Ensure the parse_mode is 'HTML' and the message uses <b> and <code> tags.
     try:
+        # Step 1: Fetch and Prepare Data
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
+        
+        # --- FIX: Handle insufficient data gracefully ---
         if df.empty or cpr_levels is None:
-            message = f"🚨 Data Fetch/Processing Error for {symbol}."
+            message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
             return
 
-        # ... (analysis logic runs here) ...
+        # Step 2: Generate Analysis & Signal
+        trend, trend_emoji, proximity_msg, signal, signal_emoji = get_trend_and_signal(df, cpr_levels)
         current_price = df.iloc[-1]['close']
         
-        # ... (HTML message construction remains here) ...
+        # Step 3: Format Professional Message (Using HTML to fix parsing errors)
         
-        message = f"<b>📈 {symbol} Market Analysis</b>\n..." # Example HTML
+        cpr_text = (
+            f"<b>Daily CPR Levels:</b>\n"
+            f"  - <b>PP (Pivot Point):</b> <code>{cpr_levels['PP']:.2f}</code>\n"
+            f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:.2f}</code> / <code>{cpr_levels['S1']:.2f}</code>\n"
+            f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:.2f}</code> / <code>{cpr_levels['S2']:.2f}</code>\n"
+        )
         
+        message = (
+            f"<b>📈 {symbol} Market Analysis ({TIMEFRAME} Chart)</b>\n"
+            f"---🚨 <b>{signal_emoji} AI SIGNAL: {signal}</b> 🚨---\n\n"
+            f"💰 <b>Current Price:</b> <code>{current_price:.2f}</code>\n"
+            f"{trend_emoji} <b>Trend Analysis (SMA 9/20):</b> {trend}\n\n"
+            f"📊 <b>Key Levels Summary</b>\n"
+            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n" # Fix any stray markdown in proximity_msg
+            f"{cpr_text}"
+            f"\n<i>Analysis based on Daily CPR and {TIMEFRAME} SMA Crossover.</i>"
+        )
+
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
         
         bot_stats['total_analyses'] += 1
@@ -89,30 +224,43 @@ async def generate_and_send_signal(symbol):
         bot_stats['status'] = "operational"
 
     except Exception as e:
+        # --- FIX: Diagnostic error logging ---
+        error_trace = traceback.format_exc()
         print(f"❌ Error generating signal for {symbol}: {e}")
-        bot_stats['status'] = f"error: {str(e)[:50]}"
+        print(error_trace) 
 
-# 5. Scheduler Setup
+        # Send a simplified, HTML-formatted diagnostic message to the channel
+        diagnostic_message = (
+            f"❌ <b>FATAL ANALYSIS ERROR for {symbol}</b> ❌\n\n"
+            f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n"
+            f"<b>Issue:</b> The calculation thread crashed.\n\n"
+            f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>" # Print the error itself safely
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=diagnostic_message, parse_mode='HTML')
+
+
 async def start_scheduler_loop():
     """Sets up the scheduler and keeps the asyncio loop running."""
     scheduler = AsyncIOScheduler()
     
+    # Set up the job for each crypto
     for symbol in [s.strip() for s in CRYPTOS]:
         scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[symbol]) 
     
     scheduler.start()
-    bot_stats['status'] = "operational"
     print("🚀 Scheduler started successfully.")
 
-    # Keep the main asyncio loop running
-    # The Gunicorn worker process will manage the web server thread
+    # Run initial analysis immediately after scheduler starts
+    await generate_and_send_signal(CRYPTOS[0].strip()) # Run for the first crypto immediately
+    if len(CRYPTOS) > 1:
+        await generate_and_send_signal(CRYPTOS[1].strip())
+
+    # Keep the main thread running (Worker thread)
     while True:
         await asyncio.sleep(60)
 
-# ==========================================================
-# ======= CRITICAL STARTUP FIX: Scheduler in a Thread ========
-# ==========================================================
-# Gunicorn loads the 'app' object and immediately executes code outside of functions.
+
+# 5. CRITICAL STARTUP THREAD (Fixes the Gunicorn/Threading Conflict)
 
 def start_asyncio_thread():
     """Target function for the background thread."""
@@ -121,8 +269,8 @@ def start_asyncio_thread():
     except Exception as e:
         print(f"FATAL SCHEDULER ERROR: {e}")
 
-# Check if we are running under Gunicorn (i.e., not '__main__')
-# This thread is started immediately upon Gunicorn loading main:app.
+# This thread starts immediately when Gunicorn loads the 'app' instance, 
+# running the scheduler in the background while Gunicorn handles the web server.
 scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
