@@ -32,11 +32,13 @@ exchange = ccxt.kucoin({
 # 1. CPR Calculation Function (using high, low, close from previous Daily candle)
 def calculate_cpr_levels(df_daily):
     """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
-    if df_daily.empty:
-        return {}
+    # --- CRITICAL FIX: Check for sufficient data ---
+    if df_daily.empty or len(df_daily) < 2:
+        print("⚠️ CPR calculation failed: Not enough historical daily data (need at least 2 days).")
+        return None # Return None instead of an empty dict to signal a definite failure
 
     # Get data from the *last completed* daily candle (index -2)
-    prev_day = df_daily.iloc[-2] 
+    prev_day = df_daily.iloc[-2]  
     
     H = prev_day['high']
     L = prev_day['low']
@@ -47,7 +49,7 @@ def calculate_cpr_levels(df_daily):
     BC = (H + L) / 2.0  # Bottom Central Pivot / Range
     TC = PP - BC + PP   # Top Central Pivot / Range
     
-    # Resistance & Support Levels
+    # Resistance & Support Levels (R1/S1, R2/S2, R3/S3 remain the same)
     R1 = 2 * PP - L
     S1 = 2 * PP - H
     R2 = PP + (H - L)
@@ -206,6 +208,7 @@ if __name__ == '__main__':
     print("Starting bot...")
 
     asyncio.run(start_bot_scheduler())
+
 
 
 
