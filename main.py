@@ -1,4 +1,4 @@
-# main.py - The final working structure for Render Web Service
+# main.py - The FINAL, fully optimized structure for Render Web Service
 
 import os
 import ccxt
@@ -11,7 +11,12 @@ from telegram import Bot
 from flask import Flask, jsonify, render_template_string
 import threading
 import time
-import traceback # Required for error diagnostics
+import traceback 
+
+# --- ML Imports ---
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split 
+from sklearn.preprocessing import StandardScaler # Added for robust training
 
 # --- CONFIGURATION LOADING ---
 from dotenv import load_dotenv 
@@ -22,18 +27,21 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CRYPTOS = os.getenv("CRYPTOS", "BTC/USDT,ETH/USDT").split(',') 
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 DAILY_TIMEFRAME = '1d' 
-ANALYSIS_INTERVAL = 30 # Set to 30 minutes
+ANALYSIS_INTERVAL = 30 
 
 # Initialize Bot and Exchange
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-# Switched to KuCoin for stable API access
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'rateLimit': 1000, 
 })
 
+# Global ML Model and Scaler
+ML_MODEL = None
+SCALER = None
+
 # ========== FLASK WEB SERVER & STATUS TRACKING ==========
-app = Flask(__name__) # Gunicorn loads this 'app' instance
+app = Flask(__name__) 
 
 bot_stats = {
     "status": "initializing",
@@ -59,29 +67,61 @@ def health():
 def status():
     return jsonify(bot_stats), 200
 
+# ========== ML TRAINING FUNCTION (Executed once at startup) ==========
+
+def train_prediction_model(df):
+    """
+    Trains a Logistic Regression model and returns the model and scaler.
+    """
+    global SCALER
+    
+    if len(df) < 500:
+        print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
+        return None, None
+
+    # 1. Target Definition (y): Did the price go up on the *next* candle?
+    df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
+    
+    # 2. Feature Engineering (X): Use SMA crossovers and volatility
+    df['fast_over_slow'] = np.where(df['fast_sma'] > df['slow_sma'], 1, 0)
+    df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
+    df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) # Calculate and fill NaNs
+    
+    df = df.dropna()
+    
+    X = df[['fast_over_slow', 'close_over_fast', 'volatility']]
+    y = df['target']
+    
+    # Use only the first 90% for training
+    X_train = X.iloc[:-int(len(X) * 0.1)]
+    y_train = y.iloc[:-int(len(y) * 0.1)]
+
+    # 3. Scaling (CRUCIAL for Logistic Regression)
+    SCALER = StandardScaler()
+    X_train_scaled = SCALER.fit_transform(X_train)
+
+    # 4. Training
+    model = LogisticRegression(solver='liblinear')
+    model.fit(X_train_scaled, y_train)
+    
+    print(f"✅ ML Model trained successfully. Accuracy: {model.score(X_train_scaled, y_train):.2f}")
+    return model, SCALER
+
 # ========== TECHNICAL ANALYSIS FUNCTIONS (Defined before scheduler calls them) ==========
 
 # 1. CPR Calculation Function
 def calculate_cpr_levels(df_daily):
     """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
-    # --- FIX: Check for sufficient data ---
     if df_daily.empty or len(df_daily) < 2:
-        print("⚠️ CPR calculation failed: Not enough historical daily data (need at least 2 days).")
         return None
 
-    # Get data from the *last completed* daily candle (index -2)
     prev_day = df_daily.iloc[-2]  
+    H, L, C = prev_day['high'], prev_day['low'], prev_day['close']
     
-    H = prev_day['high']
-    L = prev_day['low']
-    C = prev_day['close']
-    
-    # CPR Components
     PP = (H + L + C) / 3.0
     BC = (H + L) / 2.0
     TC = PP - BC + PP
     
-    # Resistance & Support Levels
     R1 = 2 * PP - L
     S1 = 2 * PP - H
     R2 = PP + (H - L)
@@ -89,115 +129,130 @@ def calculate_cpr_levels(df_daily):
     R3 = H + 2 * (PP - L)
     S3 = L - 2 * (H - PP)
     
-    cpr_width = abs(TC - BC)
-
-    return {
-        'PP': PP, 'TC': TC, 'BC': BC, 'R1': R1, 'S1': S1,
-        'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3, 'CPR_Width': cpr_width
-    }
+    return {'PP': PP, 'TC': TC, 'BC': BC, 'R1': R1, 'S1': S1,
+            'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3}
 
 # 2. Data Fetching and Preparation Function
-def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=100):
-    """Fetches main chart data and daily data for CPR, and calculates SMAs."""
+def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
+    """Fetches main chart data, prepares for analysis, and calculates SMAs."""
     
-    # Fetch main chart data (e.g., 4h data)
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    
-    # --- FIX: Drop NaNs from the main DataFrame before and after SMA calculation ---
     df = df.dropna()
     
     # Calculate SMAs (9 and 20 periods)
     df['fast_sma'] = df['close'].rolling(window=9).mean()
     df['slow_sma'] = df['close'].rolling(window=20).mean()
     
-    # Drop NaNs again after calculating SMAs (the first 20 rows will have NaNs)
     df = df.dropna() 
     
-    # Check if we have enough data left for analysis
-    if len(df) < 20: # Ensure we have enough clean rows to analyze the trend
+    if len(df) < 20: 
         return pd.DataFrame(), None
     
-    # Fetch Daily data for CPR calculation
-    ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=limit)
+    ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=20) # Only need 20 days for CPR
     df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df_daily.set_index('timestamp', inplace=True)
     
-    # Calculate CPR levels
     cpr_levels = calculate_cpr_levels(df_daily)
     
     return df, cpr_levels
 
 # 3. Trend and Signal Generation
 def get_trend_and_signal(df, cpr_levels):
-    """Determines trend via SMA crossover and checks price vs CPR levels."""
+    """Determines trend via SMA crossover and incorporates ML prediction."""
     
-    # Get the latest data point
     latest = df.iloc[-1]
     current_price = latest['close']
     fast_sma = latest['fast_sma']
     slow_sma = latest['slow_sma']
     
-    # Check for SMA Crossover (Trend)
+    # --- ML Prediction ---
+    ml_prediction = "NEUTRAL"
+    if ML_MODEL is not None and SCALER is not None:
+        try:
+            # 1. Feature Engineering (must match training features)
+            is_fast_over_slow = 1 if fast_sma > slow_sma else 0
+            is_close_over_fast = 1 if current_price > fast_sma else 0
+            
+            # Calculate current volatility for prediction
+            current_volatility = df['close'].pct_change().iloc[-20:].std().fillna(0)
+            
+            latest_features = pd.DataFrame({
+                'fast_over_slow': [is_fast_over_slow],
+                'close_over_fast': [is_close_over_fast],
+                'volatility': [current_volatility.iloc[-1] if isinstance(current_volatility, pd.Series) and not current_volatility.empty else 0.0]
+            })
+            
+            # 2. Scaling and Prediction
+            X_predict_scaled = SCALER.transform(latest_features)
+            prediction = ML_MODEL.predict(X_predict_scaled)[0]
+            probability = ML_MODEL.predict_proba(X_predict_scaled)[0]
+            bullish_prob = probability[1]
+            
+            if prediction == 1 and bullish_prob > 0.55:
+                ml_prediction = f"BULLISH ({bullish_prob*100:.0f}%)"
+            elif prediction == 0 and probability[0] > 0.55:
+                ml_prediction = f"BEARISH ({probability[0]*100:.0f}%)"
+            else:
+                 ml_prediction = "NEUTRAL (Low Conviction)"
+
+        except Exception as e:
+            print(f"❌ ML PREDICTION FAILED: {e}")
+            ml_prediction = "NEUTRAL (ML Error)"
+
+    # --- Trend Assessment (Used for confirmation and fallback) ---
     trend = "Neutral"
     if fast_sma > slow_sma:
-        trend = "Uptrend (Fast SMA > Slow SMA)"
+        trend = "Uptrend"
         trend_emoji = "🟢"
     elif fast_sma < slow_sma:
-        trend = "Downtrend (Fast SMA < Slow SMA)"
+        trend = "Downtrend"
         trend_emoji = "🔴"
     else:
         trend_emoji = "🟡"
 
-    # Check for proximity to the Central Pivot Point (PP)
+    # --- Final Signal and Proximity (Unchanged logic) ---
     pp = cpr_levels.get('PP', 'N/A')
-    
     proximity_msg = ""
     if pp != 'N/A':
         distance_to_pp = current_price - pp
-        if abs(distance_to_pp / pp) < 0.005: # Price is within 0.5% of PP
+        if abs(distance_to_pp / pp) < 0.005: 
             proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
         elif distance_to_pp > 0:
             proximity_msg = f"Price is <b>Above PP</b> ({pp:.2f})."
         else:
             proximity_msg = f"Price is <b>Below PP</b> ({pp:.2f})."
             
-    # Simple Signal: Buy if Uptrend and Above PP, Sell if Downtrend and Below PP
     signal = "HOLD"
     signal_emoji = "🟡"
-    if trend == "Uptrend (Fast SMA > Slow SMA)" and current_price > pp:
+    if "BULLISH" in ml_prediction and current_price > pp:
         signal = "STRONG BUY"
         signal_emoji = "🚀"
-    elif trend == "Downtrend (Fast SMA < Slow SMA)" and current_price < pp:
+    elif "BEARISH" in ml_prediction and current_price < pp:
         signal = "STRONG SELL"
         signal_emoji = "🔻"
         
-    return trend, trend_emoji, proximity_msg, signal, signal_emoji
-
+    return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction
 
 # 4. ASYNC SCHEDULER FUNCTIONS
 
 async def generate_and_send_signal(symbol):
     """Fetches data, runs analysis, and sends the Telegram message."""
-    print(f"Generating signal for {symbol}...")
     
     try:
         # Step 1: Fetch and Prepare Data
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
-        # --- Handle insufficient data gracefully ---
         if df.empty or cpr_levels is None:
             message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
             return
 
         # Step 2: Generate Analysis & Signal
-        trend, trend_emoji, proximity_msg, signal, signal_emoji = get_trend_and_signal(df, cpr_levels)
+        trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction = get_trend_and_signal(df, cpr_levels)
         current_price = df.iloc[-1]['close']
-        
-        # Step 3: Format Professional Message (Using HTML to fix parsing errors)
         
         cpr_text = (
             f"<b>Daily CPR Levels:</b>\n"
@@ -206,20 +261,35 @@ async def generate_and_send_signal(symbol):
             f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:.2f}</code> / <code>{cpr_levels['S2']:.2f}</code>\n"
         )
         
-        # --- FINAL FIX: Construct the message, then apply HTML escaping ---
+        # --- FINAL PROFESSIONAL HTML MESSAGE TEMPLATE ---
+        
         message = (
-            f"<b>📈 {symbol} Market Analysis ({TIMEFRAME} Chart)</b>\n"
-            f"---🚨 <b>{signal_emoji} AI SIGNAL: {signal}</b> 🚨---\n\n"
-            f"💰 <b>Current Price:</b> <code>{current_price:.2f}</code>\n"
-            f"{trend_emoji} <b>Trend Analysis (SMA 9/20):</b> {trend}\n\n"
-            f"📊 <b>Key Levels Summary</b>\n"
-            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n"
-            f"{cpr_text}"
-            f"\n<i>Analysis based on Daily CPR and {TIMEFRAME} SMA Crossover.</i>"
+            f"╔════════════════════════════════╗\n"
+            f"  🧠 <b>AI MARKET INTELLIGENCE REPORT</b>\n"
+            f"╚════════════════════════════════╝\n\n"
+            
+            f"** {symbol} | {datetime.now().strftime('%Y-%m-%d %H:%M UTC')} **\n\n"
+            
+            f"---🚨 <b>{signal_emoji} FINAL SIGNAL: {signal}</b> 🚨---\n\n"
+            
+            f"<b>💰 Current Price:</b> <code>{current_price:,.2f}</code>\n"
+            f"<b>⏰ Timeframe:</b> {TIMEFRAME}\n"
+            
+            f"\n\n<b>🤖 ML PREDICTION</b>\n"
+            f"<b>Forecast:</b> {ml_prediction}\n"
+            f"<b>Confidence:</b> {ml_prediction.split(' ')[-1].replace(')', '').replace('(', '')}\n"
+            
+            f"\n\n<b>📊 TECHNICAL & KEY LEVELS</b>\n"
+            f"{trend_emoji} <b>Trend (SMA 9/20):</b> {trend}\n"
+            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n\n"
+            
+            f"{cpr_text}\n"
+            
+            f"----------------------------------------\n"
+            f"<i>Disclaimer: This analysis is for educational purposes only.</i>"
         )
 
         # Apply global HTML escaping to prevent the 'unsupported start tag' error
-        # Replace <, >, and & with their HTML entities, but skip valid tags
         message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         
         # Revert valid HTML tags back from their escaped form
@@ -234,12 +304,9 @@ async def generate_and_send_signal(symbol):
         bot_stats['status'] = "operational"
 
     except Exception as e:
-        # --- FIX: Diagnostic error logging ---
         error_trace = traceback.format_exc()
         print(f"❌ Error generating signal for {symbol}: {e}")
-        print(error_trace) 
-
-        # Send a simplified, HTML-formatted diagnostic message to the channel
+        
         diagnostic_message = (
             f"❌ <b>FATAL ANALYSIS ERROR for {symbol}</b> ❌\n\n"
             f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n"
@@ -251,9 +318,36 @@ async def generate_and_send_signal(symbol):
 
 async def start_scheduler_loop():
     """Sets up the scheduler and keeps the asyncio loop running."""
+    
+    # --- ML Training before starting the loop ---
+    global ML_MODEL
+    global SCALER
+
+    print("\n⏳ Preparing and training Machine Learning Model...")
+    try:
+        # Fetch data for training purposes (500 candles)
+        ohlcv_train = exchange.fetch_ohlcv(CRYPTOS[0].strip(), TIMEFRAME, limit=600)
+        df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_train['close'] = pd.to_numeric(df_train['close'])
+        
+        # Calculate SMAs on training data
+        df_train['fast_sma'] = df_train['close'].rolling(window=9).mean()
+        df_train['slow_sma'] = df_train['close'].rolling(window=20).mean()
+        
+        # Ensure we have enough data and drop NaNs
+        df_train = df_train.dropna()
+        
+        ML_MODEL, SCALER = train_prediction_model(df_train)
+        
+    except Exception as e:
+        print(f"❌ ML Model Training Failed: {e}")
+        ML_MODEL = None
+        SCALER = None
+
+
+    # --- Start the scheduler loop ---
     scheduler = AsyncIOScheduler()
     
-    # Set up the job for each crypto
     for symbol in [s.strip() for s in CRYPTOS]:
         scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[symbol]) 
     
@@ -285,4 +379,3 @@ scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
 print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
-# The Web Service is now running Flask (via Gunicorn) AND the scheduler (via Thread)
