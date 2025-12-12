@@ -75,9 +75,17 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=100):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     
+    # --- CRITICAL FIX: Drop NaNs from the main DataFrame ---
+    # This prevents SMA/rolling calculations from crashing subsequent steps.
+    df = df.dropna()
+    
     # Calculate SMAs (9 and 20 periods, as per the script)
     df['fast_sma'] = df['close'].rolling(window=9).mean()
     df['slow_sma'] = df['close'].rolling(window=20).mean()
+    
+    # --- CRITICAL FIX: Drop NaNs again after calculating SMAs ---
+    # The first 20 rows of SMA columns will be NaN, so we must drop them
+    df = df.dropna() 
     
     # Fetch Daily data for CPR calculation
     ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=limit)
@@ -86,6 +94,10 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=100):
     
     # Calculate CPR levels
     cpr_levels = calculate_cpr_levels(df_daily)
+    
+    # Check if we have enough data left for analysis
+    if len(df) < 1:
+        return pd.DataFrame(), {} # Return empty if all data was cleaned out
     
     return df, cpr_levels
 
@@ -208,6 +220,7 @@ if __name__ == '__main__':
     print("Starting bot...")
 
     asyncio.run(start_bot_scheduler())
+
 
 
 
