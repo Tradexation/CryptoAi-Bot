@@ -16,7 +16,7 @@ import traceback
 # --- ML Imports ---
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split 
-from sklearn.preprocessing import StandardScaler # Added for robust training
+from sklearn.preprocessing import StandardScaler 
 
 # --- CONFIGURATION LOADING ---
 from dotenv import load_dotenv 
@@ -36,7 +36,7 @@ exchange = ccxt.kucoin({
     'rateLimit': 1000, 
 })
 
-# Global ML Model and Scaler
+# Global ML Model and Scaler (must be global for prediction)
 ML_MODEL = None
 SCALER = None
 
@@ -53,7 +53,6 @@ bot_stats = {
 
 @app.route('/')
 def home():
-    # Placeholder for a simple homepage
     return render_template_string("<h1>Bot Status Page</h1>" + 
                                  f"<p>Status: {bot_stats['status']}</p>" + 
                                  f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
@@ -67,36 +66,33 @@ def health():
 def status():
     return jsonify(bot_stats), 200
 
-# ========== ML TRAINING FUNCTION (Executed once at startup) ==========
+# ========== ML TRAINING FUNCTION ==========
 
 def train_prediction_model(df):
-    """
-    Trains a Logistic Regression model and returns the model and scaler.
-    """
+    """Trains a Logistic Regression model and returns the model and scaler."""
     global SCALER
     
     if len(df) < 500:
         print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
         return None, None
 
-    # 1. Target Definition (y): Did the price go up on the *next* candle?
+    # 1. Target Definition (y)
     df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
     
-    # 2. Feature Engineering (X): Use SMA crossovers and volatility
+    # 2. Feature Engineering (X)
     df['fast_over_slow'] = np.where(df['fast_sma'] > df['slow_sma'], 1, 0)
     df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
-    df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) # Calculate and fill NaNs
+    df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) 
     
     df = df.dropna()
     
     X = df[['fast_over_slow', 'close_over_fast', 'volatility']]
     y = df['target']
     
-    # Use only the first 90% for training
     X_train = X.iloc[:-int(len(X) * 0.1)]
     y_train = y.iloc[:-int(len(y) * 0.1)]
 
-    # 3. Scaling (CRUCIAL for Logistic Regression)
+    # 3. Scaling
     SCALER = StandardScaler()
     X_train_scaled = SCALER.fit_transform(X_train)
 
@@ -107,7 +103,7 @@ def train_prediction_model(df):
     print(f"✅ ML Model trained successfully. Accuracy: {model.score(X_train_scaled, y_train):.2f}")
     return model, SCALER
 
-# ========== TECHNICAL ANALYSIS FUNCTIONS (Defined before scheduler calls them) ==========
+# ========== TECHNICAL ANALYSIS FUNCTIONS ==========
 
 # 1. CPR Calculation Function
 def calculate_cpr_levels(df_daily):
@@ -142,7 +138,6 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     df.set_index('timestamp', inplace=True)
     df = df.dropna()
     
-    # Calculate SMAs (9 and 20 periods)
     df['fast_sma'] = df['close'].rolling(window=9).mean()
     df['slow_sma'] = df['close'].rolling(window=20).mean()
     
@@ -151,7 +146,7 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     if len(df) < 20: 
         return pd.DataFrame(), None
     
-    ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=20) # Only need 20 days for CPR
+    ohlcv_daily = exchange.fetch_ohlcv(symbol, daily_timeframe, limit=20) 
     df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df_daily.set_index('timestamp', inplace=True)
     
@@ -169,28 +164,33 @@ def get_trend_and_signal(df, cpr_levels):
     slow_sma = latest['slow_sma']
     
     # --- ML Prediction ---
-    ml_prediction = "NEUTRAL"
+    ml_prediction = "NEUTRAL (No Model)"
     if ML_MODEL is not None and SCALER is not None:
         try:
-            # 1. Feature Engineering (must match training features)
+            # 1. Feature Engineering
             is_fast_over_slow = 1 if fast_sma > slow_sma else 0
             is_close_over_fast = 1 if current_price > fast_sma else 0
             
-            # Calculate current volatility for prediction
-            current_volatility = df['close'].pct_change().iloc[-20:].std().fillna(0)
+            # --- FIX: Calculate current volatility robustly ---
+            close_prices = df['close']
+            returns = close_prices.pct_change()
+            # Get the last 20 periods for volatility, fill NaN with 0 if calculation fails
+            current_volatility = returns.iloc[-20:].std(skipna=True).fillna(0)
             
+            # 2. Build the latest features DataFrame
             latest_features = pd.DataFrame({
                 'fast_over_slow': [is_fast_over_slow],
                 'close_over_fast': [is_close_over_fast],
-                'volatility': [current_volatility.iloc[-1] if isinstance(current_volatility, pd.Series) and not current_volatility.empty else 0.0]
+                'volatility': [current_volatility] 
             })
             
-            # 2. Scaling and Prediction
+            # 3. Scaling and Prediction
             X_predict_scaled = SCALER.transform(latest_features)
             prediction = ML_MODEL.predict(X_predict_scaled)[0]
             probability = ML_MODEL.predict_proba(X_predict_scaled)[0]
             bullish_prob = probability[1]
             
+            # 4. Final Prediction Output
             if prediction == 1 and bullish_prob > 0.55:
                 ml_prediction = f"BULLISH ({bullish_prob*100:.0f}%)"
             elif prediction == 0 and probability[0] > 0.55:
@@ -199,8 +199,12 @@ def get_trend_and_signal(df, cpr_levels):
                  ml_prediction = "NEUTRAL (Low Conviction)"
 
         except Exception as e:
-            print(f"❌ ML PREDICTION FAILED: {e}")
+            # If any step in the prediction fails, log the error and skip
+            print(f"❌ ML PREDICTION FAILED (Runtime Error): {e}")
             ml_prediction = "NEUTRAL (ML Error)"
+            
+    # --- End of ML Prediction Block ---
+
 
     # --- Trend Assessment (Used for confirmation and fallback) ---
     trend = "Neutral"
@@ -213,8 +217,9 @@ def get_trend_and_signal(df, cpr_levels):
     else:
         trend_emoji = "🟡"
 
-    # --- Final Signal and Proximity (Unchanged logic) ---
+    # --- Final Signal Generation ---
     pp = cpr_levels.get('PP', 'N/A')
+    
     proximity_msg = ""
     if pp != 'N/A':
         distance_to_pp = current_price - pp
@@ -289,7 +294,7 @@ async def generate_and_send_signal(symbol):
             f"<i>Disclaimer: This analysis is for educational purposes only.</i>"
         )
 
-        # Apply global HTML escaping to prevent the 'unsupported start tag' error
+        # Apply global HTML escaping
         message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         
         # Revert valid HTML tags back from their escaped form
@@ -325,16 +330,12 @@ async def start_scheduler_loop():
 
     print("\n⏳ Preparing and training Machine Learning Model...")
     try:
-        # Fetch data for training purposes (500 candles)
         ohlcv_train = exchange.fetch_ohlcv(CRYPTOS[0].strip(), TIMEFRAME, limit=600)
         df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_train['close'] = pd.to_numeric(df_train['close'])
         
-        # Calculate SMAs on training data
         df_train['fast_sma'] = df_train['close'].rolling(window=9).mean()
         df_train['slow_sma'] = df_train['close'].rolling(window=20).mean()
-        
-        # Ensure we have enough data and drop NaNs
         df_train = df_train.dropna()
         
         ML_MODEL, SCALER = train_prediction_model(df_train)
@@ -373,8 +374,7 @@ def start_asyncio_thread():
     except Exception as e:
         print(f"FATAL SCHEDULER ERROR: {e}")
 
-# This thread starts immediately when Gunicorn loads the 'app' instance, 
-# running the scheduler in the background while Gunicorn handles the web server.
+# This thread starts immediately when Gunicorn loads the 'app' instance
 scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
