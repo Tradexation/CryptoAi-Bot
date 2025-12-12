@@ -163,21 +163,29 @@ def get_trend_and_signal(df, cpr_levels):
     fast_sma = latest['fast_sma']
     slow_sma = latest['slow_sma']
     
-    # --- ML Prediction ---
+# --- ML Prediction Block ---
     ml_prediction = "NEUTRAL (No Model)"
     if ML_MODEL is not None and SCALER is not None:
         try:
-            # 1. Feature Engineering
+            # 1. Calculate volatility robustly and safely
+            
+            # --- CRITICAL FIX: Ensure clean Volatility number ---
+            # Use the last 20 close prices to calculate returns and standard deviation
+            close_prices_recent = df['close'].iloc[-20:] 
+            if len(close_prices_recent) < 20: # Not enough data to calculate a reliable 20-period StdDev
+                 current_volatility = 0.0
+            else:
+                 returns = close_prices_recent.pct_change().dropna()
+                 current_volatility = returns.std(skipna=True).fillna(0)
+                 # Ensure we take the final scalar value if Pandas returns a Series
+                 current_volatility = current_volatility.iloc[-1] if isinstance(current_volatility, pd.Series) and not current_volatility.empty else float(current_volatility)
+                 current_volatility = 0.0 if np.isinf(current_volatility) or np.isnan(current_volatility) else current_volatility
+            # --- End Volatility Fix ---
+
+            # 2. Build the latest features DataFrame
             is_fast_over_slow = 1 if fast_sma > slow_sma else 0
             is_close_over_fast = 1 if current_price > fast_sma else 0
             
-            # --- FIX: Calculate current volatility robustly ---
-            close_prices = df['close']
-            returns = close_prices.pct_change()
-            # Get the last 20 periods for volatility, fill NaN with 0 if calculation fails
-            current_volatility = returns.iloc[-20:].std(skipna=True).fillna(0)
-            
-            # 2. Build the latest features DataFrame
             latest_features = pd.DataFrame({
                 'fast_over_slow': [is_fast_over_slow],
                 'close_over_fast': [is_close_over_fast],
@@ -204,7 +212,6 @@ def get_trend_and_signal(df, cpr_levels):
             ml_prediction = "NEUTRAL (ML Error)"
             
     # --- End of ML Prediction Block ---
-
 
     # --- Trend Assessment (Used for confirmation and fallback) ---
     trend = "Neutral"
@@ -379,3 +386,4 @@ scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
 print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
+
