@@ -11,7 +11,7 @@ from telegram import Bot
 from flask import Flask, jsonify, render_template_string
 import threading
 import time
-import traceback # Required for better error diagnostics
+import traceback # Required for error diagnostics
 
 # --- CONFIGURATION LOADING ---
 from dotenv import load_dotenv 
@@ -26,7 +26,7 @@ ANALYSIS_INTERVAL = 30 # Set to 30 minutes
 
 # Initialize Bot and Exchange
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-# Switched to KuCoin to bypass Binance geo-restrictions and Coinbase timeframe errors
+# Switched to KuCoin for stable API access
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'rateLimit': 1000, 
@@ -187,7 +187,7 @@ async def generate_and_send_signal(symbol):
         # Step 1: Fetch and Prepare Data
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
-        # --- FIX: Handle insufficient data gracefully ---
+        # --- Handle insufficient data gracefully ---
         if df.empty or cpr_levels is None:
             message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
@@ -206,17 +206,27 @@ async def generate_and_send_signal(symbol):
             f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:.2f}</code> / <code>{cpr_levels['S2']:.2f}</code>\n"
         )
         
+        # --- FINAL FIX: Construct the message, then apply HTML escaping ---
         message = (
             f"<b>📈 {symbol} Market Analysis ({TIMEFRAME} Chart)</b>\n"
             f"---🚨 <b>{signal_emoji} AI SIGNAL: {signal}</b> 🚨---\n\n"
             f"💰 <b>Current Price:</b> <code>{current_price:.2f}</code>\n"
             f"{trend_emoji} <b>Trend Analysis (SMA 9/20):</b> {trend}\n\n"
             f"📊 <b>Key Levels Summary</b>\n"
-            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n" # Fix any stray markdown in proximity_msg
+            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n"
             f"{cpr_text}"
             f"\n<i>Analysis based on Daily CPR and {TIMEFRAME} SMA Crossover.</i>"
         )
 
+        # Apply global HTML escaping to prevent the 'unsupported start tag' error
+        # Replace <, >, and & with their HTML entities, but skip valid tags
+        message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # Revert valid HTML tags back from their escaped form
+        message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
+        message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+        
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
         
         bot_stats['total_analyses'] += 1
@@ -234,7 +244,7 @@ async def generate_and_send_signal(symbol):
             f"❌ <b>FATAL ANALYSIS ERROR for {symbol}</b> ❌\n\n"
             f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n"
             f"<b>Issue:</b> The calculation thread crashed.\n\n"
-            f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>" # Print the error itself safely
+            f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>" 
         )
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=diagnostic_message, parse_mode='HTML')
 
@@ -251,7 +261,7 @@ async def start_scheduler_loop():
     print("🚀 Scheduler started successfully.")
 
     # Run initial analysis immediately after scheduler starts
-    await generate_and_send_signal(CRYPTOS[0].strip()) # Run for the first crypto immediately
+    await generate_and_send_signal(CRYPTOS[0].strip()) 
     if len(CRYPTOS) > 1:
         await generate_and_send_signal(CRYPTOS[1].strip())
 
