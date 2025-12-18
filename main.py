@@ -330,7 +330,7 @@ async def generate_and_send_signal(symbol):
             f"{cpr_text}\n"
             
             f"----------------------------------------\n"
-            f"<i>Disclaimer: This analysis is for educational purposes only.</i>"
+            f"<i></i>"
         )
 
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
@@ -418,4 +418,5 @@ scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
 print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
+
 
