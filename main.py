@@ -78,7 +78,7 @@ def fetch_data_safe(symbol, timeframe):
 def generate_and_send_signal(symbol):
     global bot_stats
     try:
-        # 1. Fetch Mult-Timeframe Data
+        # 1. Fetch Multi-Timeframe Data
         df_4h = fetch_data_safe(symbol, TIMEFRAME_MAIN)
         df_1h = fetch_data_safe(symbol, TIMEFRAME_ENTRY)
         
@@ -129,4 +129,57 @@ def generate_and_send_signal(symbol):
             f"✅ <b>Take Profit 1:</b> <code>{tp1:,.2f}</code>\n"
             f"🔥 <b>Take Profit 2:</b> <code>{tp2:,.2f}</code>\n"
             f"🛑 <b>Stop Loss:</b> <code>{sl:,.2f}</code>\n\n"
-            f"----------------------------------------\n
+            f"----------------------------------------\n"
+            f"<i>Powered by Advanced Quant V2.5 Elite</i>"
+        )
+
+        asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML'))
+        
+        bot_stats['total_analyses'] += 1
+        bot_stats['last_analysis'] = datetime.now().isoformat()
+        bot_stats['status'] = "operational"
+
+    except Exception as e:
+        print(f"❌ Analysis failed for {symbol}: {e}")
+
+# =========================================================================
+# === GUNICORN-SAFE INITIALIZATION ===
+# =========================================================================
+
+def start_bot():
+    print(f"🚀 Initializing {bot_stats['version']}...")
+    scheduler = BackgroundScheduler()
+    for s in CRYPTOS:
+        # Schedule for every hour and half-hour
+        scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[s.strip()])
+    scheduler.start()
+    
+    # Run first analysis immediately in the background
+    for s in CRYPTOS:
+        threading.Thread(target=generate_and_send_signal, args=(s.strip(),)).start()
+
+start_bot()
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return render_template_string("""
+        <body style="font-family:sans-serif; background:#0f172a; color:#f8fafc; text-align:center; padding-top:100px;">
+            <div style="background:#1e293b; display:inline-block; padding:40px; border-radius:15px; border: 1px solid #334155;">
+                <h1 style="color:#22d3ee;">AI Quant Dashboard</h1>
+                <p style="font-size:1.2em;">Status: <span style="color:#4ade80;">Active</span></p>
+                <p>Analyses Streamed: <b>{{a}}</b></p>
+                <p>Version: <i>{{v}}</i></p>
+                <hr style="border-color:#334155;">
+                <p style="font-size:0.8em; color:#94a3b8;">{{t}}</p>
+            </div>
+        </body>
+    """, a=bot_stats['total_analyses'], v=bot_stats['version'], t=bot_stats['last_analysis'])
+
+@app.route('/health')
+def health(): return jsonify({"status": "healthy"}), 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
