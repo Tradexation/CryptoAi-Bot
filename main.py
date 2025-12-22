@@ -116,7 +116,7 @@ def generate_and_send_signal(symbol):
         # --- PREMIUM HTML TEMPLATE ---
         message = (
             f"╔════════════════════════════════╗\n"
-            f"  🏆 <b>PREMIUM AI QUANT REPORT</b>\n"
+            f"  🏆 <b>PREMIUM AI SIGNAL</b>\n"
             f"╚════════════════════════════════╝\n\n"
             f"<b>Asset:</b> {symbol}\n"
             f"<b>Price:</b> <code>{price:,.2f}</code>\n\n"
@@ -130,7 +130,7 @@ def generate_and_send_signal(symbol):
             f"🔥 <b>Take Profit 2:</b> <code>{tp2:,.2f}</code>\n"
             f"🛑 <b>Stop Loss:</b> <code>{sl:,.2f}</code>\n\n"
             f"----------------------------------------\n"
-            f"<i>Powered by Advanced Quant V2.5 Elite</i>"
+            f"<i>Powered by Advanced CPR By Nilesh</i>"
         )
 
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML'))
@@ -183,3 +183,4 @@ def health(): return jsonify({"status": "healthy"}), 200
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
